@@ -36,6 +36,9 @@ class ShootingEnv:
         self.player_x = 0
         self.enemy_x = width - 1
 
+        self.last_shot_row = None
+        self.last_shot_active = False
+
         self.seed()
         self.reset()
 
@@ -48,6 +51,7 @@ class ShootingEnv:
         self.player_row = self.height // 2
         # Enemy spawns at rightmost column, random row
         self.enemy_row = np.random.randint(0, self.height)
+        self.enemy_hit = False
         self.steps = 0
         self.done = False
         # For Option A, enemy does not move
@@ -79,14 +83,20 @@ class ShootingEnv:
         elif action == 2:  # Shoot
             # Bullet travels horizontally from player_x to enemy_x.
             # In Option A, enemy is at enemy_x and stationary; a hit occurs if rows match.
+
+            #self.last_shot_row = self.player_row
+            #self.last_shot_active = True
+            
             if self.player_row == self.enemy_row:
                 # Hit
                 reward += 15.0  # hitting enemy
                 reward += 30.0  # killing (for Option A, hit == kill)
                 self.done = True
+                self.enemy_hit = True
             else:
                 # Missed shot
                 reward -= 2.0
+                self.enemy_hit = False
         elif action == 3:  # No-op
             pass
         else:
@@ -108,6 +118,10 @@ class ShootingEnv:
         grid[self.player_row][self.player_x] = " P"
         # Enemy
         grid[self.enemy_row][self.enemy_x] = " E"
+        if self.enemy_hit:
+            grid[self.enemy_row][self.enemy_x] = " X"  # killed
+            for i in range(1,self.width-1):
+                grid[self.enemy_row][i] = " -"
         # Print grid with row indices
         print("=" * (self.width * 3))
         for r in range(self.height):
