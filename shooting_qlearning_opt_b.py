@@ -6,7 +6,7 @@ Grid-based Shooting Game — Option B
 - Improved ASCII rendering with bullet trail and hit effect
 - Tabular Q-learning (compact discrete state)
 
-State: (player_row, enemy_row, ammo_left, enemy_dir)
+State: (player_y, enemy_y, ammo_left, enemy_dir)
 Actions:
  0 = Move Up
  1 = Move Down
@@ -31,7 +31,7 @@ class ShootingEnvB:
                  height=10,
                  max_steps=60,
                  ammo_capacity=5,
-                 enemy_behavior="bounce",  # "bounce" or "random"
+                 enemy_behavior="random",  # "bounce" or "random"
                  seed: int | None = None):
         self.width = width
         self.height = height
@@ -41,7 +41,17 @@ class ShootingEnvB:
 
         # positions
         self.player_x = 0
-        self.enemy_x = width - 1
+        #self.enemy_x = width - 1
+
+        # enemies
+        self.max_num_enemies = 3
+        self.enemies = []
+        for i in range(self.max_num_enemies):
+            enemy_x = np.random.randint(width//2,width-1) 
+            enemy_y = np.random.randint(0, height)
+            hit = False
+            self.enemies.append([enemy_x, enemy_y, hit])
+
 
         # actions
         self.action_space_n = 4  # up, down, shoot, noop
@@ -61,16 +71,20 @@ class ShootingEnvB:
 
     def reset(self):
         # player starts vertically centered
-        self.player_row = self.height // 2
-        # enemy spawns at rightmost column, random row
-        self.enemy_row = np.random.randint(0, self.height)
+        self.player_y = self.height // 2
+        # enemy spawns
         # enemy direction: +1 (down) or -1 (up); store as int
         self.enemy_dir = 1
+        # enemy left
+        self.num_enemies = self.max_num_enemies
+        for e in self.enemies:
+            e[2] = False
         # ammo
         self.ammo = self.ammo_capacity
         # step counter
         self.steps = 0
         self.done = False
+        
 
         # rendering flags
         self.last_shot_active = False
@@ -78,16 +92,31 @@ class ShootingEnvB:
 
         return self._get_obs()
 
+
     def _get_obs(self):
-        # compact tuple state
-        return (self.player_row, self.enemy_row, self.ammo, self.enemy_dir)
+        # pad enemies list to fixed size
+        padded = self.enemies[:self.max_num_enemies] + \
+                [[-1, -1, 0]] * (self.max_num_enemies - len(self.enemies))
+
+
+        # flatten enemy positions
+        enemy_flat = [coord for enemy in padded for coord in enemy]
+
+
+        # final observation
+        return (
+            self.player_y,
+            *enemy_flat,
+            self.ammo,
+            self.enemy_dir
+        )
 
     def step(self, action):
         """
         action: 0=Up,1=Down,2=Shoot,3=No-op
         Order of events each step:
           1) execute player's action (movement or shooting)
-          2) check hit condition (shoot checks enemy_row at shooting instant)
+          2) check hit condition (shoot checks enemy_y at shooting instant)
           3) apply move penalty / ammo cost
           4) move enemy (enemy behavior)
           5) increment step, check termination
@@ -104,26 +133,29 @@ class ShootingEnvB:
 
         # ---------- Player action ----------
         if action == 0:  # Up
-            if self.player_row > 0:
-                self.player_row -= 1
+            if self.player_y > 0:
+                self.player_y -= 1
             reward -= 0.1  # cost for movement
         elif action == 1:  # Down
-            if self.player_row < self.height - 1:
-                self.player_row += 1
+            if self.player_y < self.height - 1:
+                self.player_y += 1
             reward -= 0.1
         elif action == 2:  # Shoot
             # Visual: mark shot row for render (bullet trail)
-            self.last_shot_row = self.player_row
+            self.last_shot_row = self.player_y
             self.last_shot_active = True
 
             if self.ammo > 0:
                 self.ammo -= 1
                 reward -= 1.0  # cost of using ammo
                 # Hit detection: if enemy currently on same row (timing matters)
-                if self.player_row == self.enemy_row:
-                    reward += 20.0  # hit reward
-                    self.enemy_hit = True
-                    self.done = True
+                for e in self.enemies:
+                    if self.player_y == e[1] and e[0] > self.player_x:
+                        reward += 20.0  # hit reward
+                        e[2] = True
+                        self.num_enemies -= 1
+                        if self.num_enemies == 0:
+                            self.done = True
             else:
                 # shooting with no ammo — heavier penalty
                 reward -= 5.0
@@ -134,42 +166,30 @@ class ShootingEnvB:
             raise ValueError("Invalid action.")
 
         # ---------- Enemy movement ----------
-        if not self.done:
-            if self.enemy_behavior == "bounce":
-                # bounce between top and bottom
-                self.enemy_row += self.enemy_dir
-                if self.enemy_row <= 0:
-                    self.enemy_row = 0
-                    self.enemy_dir = 1
-                elif self.enemy_row >= self.height - 1:
-                    self.enemy_row = self.height - 1
-                    self.enemy_dir = -1
-            elif self.enemy_behavior == "random":
-                # move randomly up/down/stay (but keep in bounds)
-                move = np.random.choice([-1, 0, 1])
-                self.enemy_row = max(0, min(self.height - 1, self.enemy_row + move))
-                # set direction flag for state (1=down, -1=up, 0=stay -> keep last nonzero)
-                if move > 0:
-                    self.enemy_dir = 1
-                elif move < 0:
-                    self.enemy_dir = -1
-                # if move==0 keep previous dir
-            else:
-                # default: no movement
-                pass
+        for e in self.enemies:
+            if not self.done:
+                if self.enemy_behavior == "random":
+                    # move randomly up/down/stay (but keep in bounds)
+                    move = np.random.choice([-1, 1])
+                    e[1] = max(0, min(e[1] + move, self.height - 1))
+
+                    # set direction flag for state (1=down, -1=up, 0=stay -> keep last nonzero)
+                    if move > 0:
+                        self.enemy_dir = 1
+                    elif move < 0:
+                        self.enemy_dir = -1
+                    # if move==0 keep previous dir
+                else:
+                    # default: no movement
+                    pass
 
         # ---------- Terminal conditions ----------
         if self.steps >= self.max_steps:
             self.done = True
             # penalty for timeout (didn't eliminate enemy)
-            if not self.enemy_hit:
-                reward -= 10.0
-
-        # If ammo becomes zero — episode can continue (but shooting will be penalized)
-        # Optionally end episode when ammo==0: uncomment next block to enforce:
-        # if self.ammo <= 0 and not self.enemy_hit:
-        #     self.done = True
-        #     reward -= 5.0
+            for e in self.enemies:
+                if e[2]==False:
+                    reward -= 10.0
 
         return self._get_obs(), reward, self.done, info
 
@@ -178,24 +198,18 @@ class ShootingEnvB:
         grid = [[" ." for _ in range(self.width)] for _ in range(self.height)]
 
         # Place player
-        grid[self.player_row][self.player_x] = " P"
+        grid[self.player_y][self.player_x] = " P"
 
         # Place enemy symbol (lowercase if recently hit)
         enemy_symbol = " E"
-        if self.enemy_hit:
-            enemy_symbol = " e"
 
-        grid[self.enemy_row][self.enemy_x] = enemy_symbol
-
-        # Bullet trail (one-step static visualization)
-        if self.last_shot_active and self.last_shot_row is not None:
-            r = self.last_shot_row
-            for x in range(self.player_x + 1, self.enemy_x):
-                grid[r][x] = " >"
+        for e in self.enemies:
+            grid[e[1]][e[0]] = enemy_symbol
 
             # If enemy hit we change the target cell to show the impact
-            if self.enemy_hit:
-                grid[self.enemy_row][self.enemy_x] = " *"  # impact marker
+            if e[2]:
+                grid[e[1]][e[0]] = " *"  # impact marker
+                
 
             # last_shot_active used only for current render (cleared after)
             self.last_shot_active = False
@@ -207,26 +221,26 @@ class ShootingEnvB:
         print("=" * (self.width * 3))
 
         if show_info:
-            print(f"Step: {self.steps}/{self.max_steps} | Player row: {self.player_row} | "
-                  f"Enemy row: {self.enemy_row} (dir: {self.enemy_dir}) | Ammo: {self.ammo}")
+            print(f"Step: {self.steps}/{self.max_steps} | Player row: {self.player_y} | "
+                  f"Enemy left: {self.num_enemies} (dir: {self.enemy_dir}) | Ammo: {self.ammo}")
             print()
 
 # ---------- State <-> Index mapping ----------
-def state_to_index(player_row, enemy_row, ammo, enemy_dir, height, ammo_capacity):
+def state_to_index(player_y, enemy_y, ammo, enemy_dir, height, ammo_capacity):
     # Encode enemy_dir: -1 -> 0, +1 -> 1
     dir_idx = 0 if enemy_dir <= 0 else 1
-    # shape: player_row (H) x enemy_row (H) x ammo (ammo_capacity+1) x dir (2)
-    return (((player_row * height + enemy_row) * (ammo_capacity + 1) + ammo) * 2 + dir_idx)
+    # shape: player_y (H) x enemy_y (H) x ammo (ammo_capacity+1) x dir (2)
+    return (((player_y * height + enemy_y) * (ammo_capacity + 1) + ammo) * 2 + dir_idx)
 
 def index_to_state(index, height, ammo_capacity):
     dir_idx = index % 2
     index //= 2
     ammo = index % (ammo_capacity + 1)
     index //= (ammo_capacity + 1)
-    enemy_row = index % height
-    player_row = index // height
+    enemy_y = index % height
+    player_y = index // height
     enemy_dir = -1 if dir_idx == 0 else 1
-    return player_row, enemy_row, ammo, enemy_dir
+    return player_y, enemy_y, ammo, enemy_dir
 
 # ---------- Q-learning ----------
 def train_q_learning(env,
