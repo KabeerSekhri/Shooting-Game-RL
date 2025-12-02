@@ -225,6 +225,86 @@ class ShootingEnvB:
                   f"Enemy left: {self.num_enemies} (dir: {self.enemy_dir}) | Ammo: {self.ammo}")
             print()
 
+
+import pygame
+
+class ShootingUI:
+    def __init__(self, env, cell_size=40):
+        self.env = env
+        self.cell_size = cell_size
+
+        pygame.init()
+        self.screen = pygame.display.set_mode(
+            (env.width * cell_size, env.height * cell_size)
+        )
+        pygame.display.set_caption("Shooting Game UI")
+
+        self.clock = pygame.time.Clock()
+
+    def draw_grid(self):
+        for y in range(self.env.height):
+            for x in range(self.env.width):
+                rect = pygame.Rect(
+                    x * self.cell_size,
+                    y * self.cell_size,
+                    self.cell_size,
+                    self.cell_size,
+                )
+                pygame.draw.rect(self.screen, (40, 40, 40), rect, 1)
+
+    def draw_player(self):
+        x = self.env.player_x
+        y = self.env.player_y
+        rect = pygame.Rect(
+            x * self.cell_size,
+            y * self.cell_size,
+            self.cell_size,
+            self.cell_size,
+        )
+        pygame.draw.rect(self.screen, (0, 200, 255), rect)
+
+    def draw_enemies(self):
+        for ex, ey, hit in self.env.enemies:
+            if ex < 0: 
+                continue  # removed enemy
+            color = (255, 0, 0) if not hit else (255, 255, 0)
+            rect = pygame.Rect(
+                ex * self.cell_size,
+                ey * self.cell_size,
+                self.cell_size,
+                self.cell_size,
+            )
+            pygame.draw.rect(self.screen, color, rect)
+
+    def draw_shot(self):
+        if not self.env.last_shot_active:
+            return
+        y = self.env.last_shot_row
+        for x in range(self.env.player_x + 1, self.env.width):
+            rect = pygame.Rect(
+                x * self.cell_size,
+                y * self.cell_size + self.cell_size // 4,
+                self.cell_size,
+                self.cell_size // 2,
+            )
+            pygame.draw.rect(self.screen, (255, 255, 255), rect)
+
+    def render(self, fps=10):
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                quit()
+
+        self.screen.fill((0, 0, 0))
+
+        self.draw_grid()
+        self.draw_player()
+        self.draw_enemies()
+        self.draw_shot()
+
+        pygame.display.flip()
+        self.clock.tick(fps)
+
+
 # ---------- State <-> Index mapping ----------
 def state_to_index(player_y, enemy_y, ammo, enemy_dir, height, ammo_capacity):
     """
@@ -413,6 +493,11 @@ def main():
     print("Evaluating policy (200 episodes)")
     success_rate, mean_reward, std_reward = evaluate_policy(env, Q, episodes=200, render=False)
     print(f"Eval success rate: {success_rate:.2f}, mean reward: {mean_reward:.2f} ± {std_reward:.2f}")
+    
+    print("Q shape:", Q.shape)
+    print("Example row for state 0:", Q[1000])
+    print("Max Q value:", np.max(Q))
+
 
     # Example interactive episode (rendered)
     print("\nExample interactive episode (rendered):")
