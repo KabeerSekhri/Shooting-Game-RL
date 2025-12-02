@@ -1,19 +1,11 @@
-# shooting_qlearning_option_b.py
+# shooting_qlearning_option_b_fixed.py
 """
-Grid-based Shooting Game — Option B
-- Moving enemy (bounce pattern or random)
-- Ammo system with limited ammo per episode
-- Improved ASCII rendering with bullet trail and hit effect
-- Tabular Q-learning (compact discrete state)
-
-State: (player_y, enemy_y, ammo_left, enemy_dir)
-Actions:
- 0 = Move Up
- 1 = Move Down
- 2 = Shoot
- 3 = No-op
-
-Author: ChatGPT (GPT-5 Thinking mini)
+Grid-based Shooting Game — Option B (fixed)
+- Compact discrete state consistent with Q-table
+- Proper enemy removal on hit (no leftover state between episodes)
+- Hit only the nearest alive enemy on the shot row
+- Rendering ignores removed enemies
+Author: ChatGPT (GPT-5 Thinking mini) — fixes applied
 """
 
 import numpy as np
@@ -31,7 +23,7 @@ class ShootingEnvB:
                  height=10,
                  max_steps=60,
                  ammo_capacity=5,
-                 enemy_behavior="random",  # "bounce" or "random"
+                 enemy_behavior="random",  # "bounce" or "random" or "static"
                  seed: int | None = None):
         self.width = width
         self.height = height
@@ -39,19 +31,12 @@ class ShootingEnvB:
         self.ammo_capacity = ammo_capacity
         self.enemy_behavior = enemy_behavior
 
-        # positions
+        # player x fixed at left
         self.player_x = 0
-        #self.enemy_x = width - 1
 
         # enemies
         self.max_num_enemies = 3
         self.enemies = []
-        for i in range(self.max_num_enemies):
-            enemy_x = np.random.randint(width//2,width-1) 
-            enemy_y = np.random.randint(0, height)
-            hit = False
-            self.enemies.append([enemy_x, enemy_y, hit])
-
 
         # actions
         self.action_space_n = 4  # up, down, shoot, noop
@@ -61,6 +46,7 @@ class ShootingEnvB:
         self.last_shot_active = False
         self.enemy_hit = False
 
+        # seed then reset
         self.seed(seed)
         self.reset()
 
@@ -72,19 +58,23 @@ class ShootingEnvB:
     def reset(self):
         # player starts vertically centered
         self.player_y = self.height // 2
-        # enemy spawns
+
         # enemy direction: +1 (down) or -1 (up); store as int
         self.enemy_dir = 1
-        # enemy left
+
+        # spawn fresh enemies each episode
         self.num_enemies = self.max_num_enemies
-        for e in self.enemies:
-            e[2] = False
+        self.enemies = []
+        for i in range(self.max_num_enemies):
+            enemy_x = np.random.randint(self.width // 2, self.width)
+            enemy_y = np.random.randint(0, self.height)
+            self.enemies.append([enemy_x, enemy_y, False])  # [x, y, hit_flag]
+
         # ammo
         self.ammo = self.ammo_capacity
         # step counter
         self.steps = 0
         self.done = False
-        
 
         # rendering flags
         self.last_shot_active = False
@@ -92,35 +82,32 @@ class ShootingEnvB:
 
         return self._get_obs()
 
-
     def _get_obs(self):
-        # pad enemies list to fixed size
-        padded = self.enemies[:self.max_num_enemies] + \
-                [[-1, -1, 0]] * (self.max_num_enemies - len(self.enemies))
+        """
+        Return compact observation compatible with state_to_index:
+         (player_y, nearest_enemy_y_or_height, ammo, enemy_dir)
+         - nearest_enemy_y_or_height: the Y of the nearest alive enemy to the right
+           If no alive enemy exists, return self.height (special value).
+        """
+        # find nearest alive enemy (smallest x) among alive enemies
+        alive = [e for e in self.enemies if not e[2] and e[0] >= 0 and e[1] >= 0]
+        if len(alive) == 0:
+            enemy_y = self.height  # special "no enemy" value
+        else:
+            # choose nearest enemy by x coordinate
+            nearest = min(alive, key=lambda ee: ee[0])
+            enemy_y = nearest[1]
 
-
-        # flatten enemy positions
-        enemy_flat = [coord for enemy in padded for coord in enemy]
-
-
-        # final observation
-        return (
-            self.player_y,
-            *enemy_flat,
-            self.ammo,
-            self.enemy_dir
-        )
+        return (self.player_y, enemy_y, self.ammo, self.enemy_dir)
 
     def step(self, action):
         """
         action: 0=Up,1=Down,2=Shoot,3=No-op
-        Order of events each step:
-          1) execute player's action (movement or shooting)
-          2) check hit condition (shoot checks enemy_y at shooting instant)
-          3) apply move penalty / ammo cost
-          4) move enemy (enemy behavior)
-          5) increment step, check termination
-        Returns: obs, reward, done, info
+        Order:
+          1) execute player's action
+          2) handle shooting/hit
+          3) move enemy
+          4) step count & terminal checks
         """
         if self.done:
             raise RuntimeError("Step called on terminated episode. Call reset().")
@@ -135,7 +122,7 @@ class ShootingEnvB:
         if action == 0:  # Up
             if self.player_y > 0:
                 self.player_y -= 1
-            reward -= 0.1  # cost for movement
+            reward -= 0.1  # small movement cost
         elif action == 1:  # Down
             if self.player_y < self.height - 1:
                 self.player_y += 1
@@ -147,48 +134,61 @@ class ShootingEnvB:
 
             if self.ammo > 0:
                 self.ammo -= 1
-                reward -= 1.0  # cost of using ammo
-                # Hit detection: if enemy currently on same row (timing matters)
-                for e in self.enemies:
-                    if self.player_y == e[1] and e[0] > self.player_x:
-                        reward += 20.0  # hit reward
-                        e[2] = True
-                        self.num_enemies -= 1
-                        if self.num_enemies == 0:
-                            self.done = True
+                reward -= 1.0  # ammo usage cost
+
+                # Hit detection: find alive enemies on the player's row to the right
+                candidates = [e for e in self.enemies if (not e[2]) and e[1] == self.player_y and e[0] > self.player_x]
+                if candidates:
+                    # hit the nearest such enemy (smallest x)
+                    target = min(candidates, key=lambda ee: ee[0])
+                    # mark hit and remove from play
+                    target[2] = True
+                    target[0] = -1
+                    target[1] = -1
+                    self.num_enemies -= 1
+                    reward += 20.0
+                    self.enemy_hit = True
+                    if self.num_enemies == 0:
+                        self.done = True
+                # else: shot misses (no extra reward)
             else:
                 # shooting with no ammo — heavier penalty
-                reward -= 5.0
+                reward -= 10.0
         elif action == 3:  # No-op
-            # small time penalty to push agent to act
             reward -= 0.05
         else:
             raise ValueError("Invalid action.")
 
         # ---------- Enemy movement ----------
         for e in self.enemies:
-            if not self.done:
+            if not self.done and not e[2]:
                 if self.enemy_behavior == "random":
-                    # move randomly up/down/stay (but keep in bounds)
-                    move = np.random.choice([-1, 1])
+                    move = np.random.choice([-1, 0, 1])  # allow stay for smoother motion
                     e[1] = max(0, min(e[1] + move, self.height - 1))
-
-                    # set direction flag for state (1=down, -1=up, 0=stay -> keep last nonzero)
                     if move > 0:
                         self.enemy_dir = 1
                     elif move < 0:
                         self.enemy_dir = -1
-                    # if move==0 keep previous dir
+                elif self.enemy_behavior == "bounce":
+                    # simplistic bounce: use enemy_dir to move all alive enemies vertically
+                    # flip direction if any would go out of bounds
+                    # (this is a simple shared-direction bounce)
+                    next_ys = [e[1] + self.enemy_dir for e in self.enemies if not e[2]]
+                    if any(ny < 0 or ny >= self.height for ny in next_ys):
+                        self.enemy_dir *= -1
+                    for ee in self.enemies:
+                        if not ee[2]:
+                            ee[1] = max(0, min(ee[1] + self.enemy_dir, self.height - 1))
                 else:
-                    # default: no movement
+                    # static: do nothing
                     pass
 
         # ---------- Terminal conditions ----------
-        if self.steps >= self.max_steps:
+        if self.steps >= self.max_steps or self.ammo == 0:
             self.done = True
-            # penalty for timeout (didn't eliminate enemy)
+            # penalty for remaining enemies
             for e in self.enemies:
-                if e[2]==False:
+                if not e[2]:
                     reward -= 10.0
 
         return self._get_obs(), reward, self.done, info
@@ -200,19 +200,19 @@ class ShootingEnvB:
         # Place player
         grid[self.player_y][self.player_x] = " P"
 
-        # Place enemy symbol (lowercase if recently hit)
-        enemy_symbol = " E"
-
+        # Place enemy symbol (only for alive enemies with valid coords)
         for e in self.enemies:
-            grid[e[1]][e[0]] = enemy_symbol
+            ex, ey, hit = e
+            if ex >= 0 and ey >= 0:
+                grid[ey][ex] = " E" if not hit else " *"
 
-            # If enemy hit we change the target cell to show the impact
-            if e[2]:
-                grid[e[1]][e[0]] = " *"  # impact marker
-                
-
-            # last_shot_active used only for current render (cleared after)
-            self.last_shot_active = False
+        # Optionally show bullet trail (show '|' on shot row to the right of player)
+        if self.last_shot_active and self.last_shot_row is not None:
+            r = self.last_shot_row
+            for c in range(self.player_x + 1, self.width):
+                # don't overwrite player or hit marker
+                if grid[r][c] == " .":
+                    grid[r][c] = " |"
 
         # Print the grid
         print("=" * (self.width * 3))
@@ -227,24 +227,29 @@ class ShootingEnvB:
 
 # ---------- State <-> Index mapping ----------
 def state_to_index(player_y, enemy_y, ammo, enemy_dir, height, ammo_capacity):
-    # Encode enemy_dir: -1 -> 0, +1 -> 1
+    """
+    enemy_y in [0..height-1] or height == special 'no enemy' value
+    enemy_dir: -1 -> 0, +1 -> 1
+    shape: player_y (height) x enemy_y (height+1) x ammo (ammo_capacity+1) x dir (2)
+    """
     dir_idx = 0 if enemy_dir <= 0 else 1
-    # shape: player_y (H) x enemy_y (H) x ammo (ammo_capacity+1) x dir (2)
-    return (((player_y * height + enemy_y) * (ammo_capacity + 1) + ammo) * 2 + dir_idx)
+    enemy_range = height + 1
+    return (((player_y * enemy_range + enemy_y) * (ammo_capacity + 1) + ammo) * 2 + dir_idx)
 
 def index_to_state(index, height, ammo_capacity):
     dir_idx = index % 2
     index //= 2
     ammo = index % (ammo_capacity + 1)
     index //= (ammo_capacity + 1)
-    enemy_y = index % height
-    player_y = index // height
+    enemy_range = height + 1
+    enemy_y = index % enemy_range
+    player_y = index // enemy_range
     enemy_dir = -1 if dir_idx == 0 else 1
     return player_y, enemy_y, ammo, enemy_dir
 
 # ---------- Q-learning ----------
 def train_q_learning(env,
-                     num_episodes=3000,
+                     num_episodes=10000,
                      alpha=0.1,
                      gamma=0.99,
                      epsilon_start=1.0,
@@ -254,7 +259,8 @@ def train_q_learning(env,
                      verbose=True):
     height = env.height
     ammo_capacity = env.ammo_capacity
-    n_states = height * height * (ammo_capacity + 1) * 2
+    enemy_range = height + 1
+    n_states = height * enemy_range * (ammo_capacity + 1) * 2
     n_actions = env.action_space_n
 
     Q = np.zeros((n_states, n_actions), dtype=np.float32)
@@ -282,7 +288,7 @@ def train_q_learning(env,
             next_obs, reward, done, _ = env.step(action)
             next_state_idx = state_to_index(next_obs[0], next_obs[1], next_obs[2], next_obs[3], height, ammo_capacity)
 
-            # Q update
+            # Q update (SARSA-less / Q-learning)
             best_next = np.max(Q[next_state_idx])
             Q[state_idx, action] += alpha * (reward + gamma * best_next - Q[state_idx, action])
 
@@ -297,7 +303,7 @@ def train_q_learning(env,
         episode_rewards.append(total_reward)
         epsilons.append(epsilon)
 
-        # success detection: if last episode ended with enemy_hit (we used reward heuristic)
+        # success detection: we consider >10 reward as success heuristic
         success = total_reward > 10.0
         recent_success.append(1 if success else 0)
         success_rates.append(np.mean(recent_success))
@@ -315,7 +321,6 @@ def train_q_learning(env,
 def evaluate_policy(env, Q, episodes=200, render=False):
     height = env.height
     ammo_capacity = env.ammo_capacity
-    n_actions = env.action_space_n
     successes = 0
     rewards = []
     for ep in range(episodes):
