@@ -238,8 +238,31 @@ class ShootingUI:
             (env.width * cell_size, env.height * cell_size)
         )
         pygame.display.set_caption("Shooting Game UI")
-
         self.clock = pygame.time.Clock()
+
+        # ---------------------------
+        # Load your sprites here
+        # ---------------------------
+        self.player_sprite = pygame.transform.scale(
+            pygame.image.load("assets/player.png"),
+            (cell_size, cell_size)
+        )
+
+        self.enemy_sprite = pygame.transform.scale(
+            pygame.image.load("assets/enemy.png"),
+            (cell_size, cell_size)
+        )
+
+        self.enemy_hit_sprite = pygame.transform.scale(
+            pygame.image.load("assets/enemy_hit.png"),
+            (cell_size, cell_size)
+        )
+
+        self.bullet_sprite = pygame.transform.scale(
+            pygame.image.load("assets/bullet.png"),
+            (cell_size, cell_size // 2)
+        )
+
 
     def draw_grid(self):
         for y in range(self.env.height):
@@ -255,39 +278,36 @@ class ShootingUI:
     def draw_player(self):
         x = self.env.player_x
         y = self.env.player_y
-        rect = pygame.Rect(
-            x * self.cell_size,
-            y * self.cell_size,
-            self.cell_size,
-            self.cell_size,
+        self.screen.blit(
+            self.player_sprite,
+            (x * self.cell_size, y * self.cell_size)
         )
-        pygame.draw.rect(self.screen, (0, 200, 255), rect)
+
 
     def draw_enemies(self):
         for ex, ey, hit in self.env.enemies:
-            if ex < 0: 
-                continue  # removed enemy
-            color = (255, 0, 0) if not hit else (255, 255, 0)
-            rect = pygame.Rect(
-                ex * self.cell_size,
-                ey * self.cell_size,
-                self.cell_size,
-                self.cell_size,
+            if ex < 0:
+                continue
+
+            sprite = self.enemy_hit_sprite if hit else self.enemy_sprite
+
+            self.screen.blit(
+                sprite,
+                (ex * self.cell_size, ey * self.cell_size)
             )
-            pygame.draw.rect(self.screen, color, rect)
+
 
     def draw_shot(self):
         if not self.env.last_shot_active:
             return
+
         y = self.env.last_shot_row
         for x in range(self.env.player_x + 1, self.env.width):
-            rect = pygame.Rect(
-                x * self.cell_size,
-                y * self.cell_size + self.cell_size // 4,
-                self.cell_size,
-                self.cell_size // 2,
+            self.screen.blit(
+                self.bullet_sprite,
+                (x * self.cell_size, y * self.cell_size + self.cell_size//4)
             )
-            pygame.draw.rect(self.screen, (255, 255, 255), rect)
+
 
     def render(self, fps=10):
         for event in pygame.event.get():
