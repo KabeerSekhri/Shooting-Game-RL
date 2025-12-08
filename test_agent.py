@@ -1,5 +1,6 @@
 #from shooting_qlearning_opt_b import ShootingEnvB, ShootingUI, state_to_index
-from shooting_opt_c import ShootingEnvB, ShootingUI, state_to_index
+#from shooting_opt_c import ShootingEnvB, ShootingUI, state_to_index
+from shooting_opt_d import  ShootingEnvB, ShootingUI, state_to_index
 import pygame
 
 
@@ -8,7 +9,7 @@ if __name__ == "__main__":
     import numpy as np
 
     # load trained agent
-    with open("q_table_option_c.pkl", "rb") as f:
+    with open("q_table_option_d.pkl", "rb") as f:
         Q = pickle.load(f)
 
     env = ShootingEnvB()
