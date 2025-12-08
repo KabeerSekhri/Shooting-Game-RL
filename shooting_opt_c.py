@@ -52,12 +52,12 @@ class ShootingEnvB:
         self.last_shot_active = False
         self.enemy_hit = False
 
+        # obstacles
         self.obstacles = set()
         for i in range(random.randint(1, 4)):
             y = random.randint(0, self.height-1)
             x = random.randint(2, self.width-2)
             self.obstacles.add((x, y))
-
 
         # seed then reset
         self.seed(seed)
@@ -97,12 +97,7 @@ class ShootingEnvB:
         return self._get_obs()
 
     def _get_obs(self):
-        """
-        Return compact observation compatible with state_to_index:
-         (player_y, nearest_enemy_y_or_height, ammo, enemy_dir)
-         - nearest_enemy_y_or_height: the Y of the nearest alive enemy to the right
-           If no alive enemy exists, return self.height (special value).
-        """
+
         # find nearest alive enemy (smallest x) among alive enemies
         alive = [e for e in self.enemies if not e[2] and e[0] >= 0 and e[1] >= 0]
         if len(alive) == 0:
@@ -114,6 +109,9 @@ class ShootingEnvB:
 
         return (self.player_y, enemy_y, self.ammo, self.enemy_dir)
 
+    def is_obstacle(self, x, y):
+        return (x, y) in self.obstacles
+
     def step(self, action):
         """
         action: 0=Up,1=Down,2=Shoot,3=No-op
@@ -121,7 +119,8 @@ class ShootingEnvB:
           1) execute player's action
           2) handle shooting/hit
           3) move enemy
-          4) step count & terminal checks
+          4) enemy shooting
+          5) step count & terminal checks
         """
         if self.done:
             raise RuntimeError("Step called on terminated episode. Call reset().")
@@ -135,11 +134,11 @@ class ShootingEnvB:
 
         # ---------- Player action ----------
         if action == 0:  # Up
-            if self.player_y > 0:
+            if self.player_y > 0 and not self.is_obstacle(self.player_x, self.player_y - 1):
                 self.player_y -= 1
             reward -= 0.1  # small movement cost
         elif action == 1:  # Down
-            if self.player_y < self.height - 1:
+            if self.player_y < self.height - 1 and not self.is_obstacle(self.player_x, self.player_y + 1):
                 self.player_y += 1
             reward -= 0.1
         elif action == 2:  # Shoot
@@ -156,16 +155,23 @@ class ShootingEnvB:
                 if candidates:
                     # hit the nearest such enemy (smallest x)
                     target = min(candidates, key=lambda ee: ee[0])
-                    # mark hit and remove from play
-                    target[2] = True
-                    target[0] = -1
-                    target[1] = -1
-                    self.num_enemies -= 1
-                    reward += 20.0
-                    self.enemy_hit = True
-                    if self.num_enemies == 0:
-                        self.done = True
-                # else: shot misses (no extra reward)
+                    
+                    # check obstacles in between
+                    blocked = any(self.is_obstacle(x, self.player_y) 
+                                for x in range(self.player_x + 1, target[0]))
+                    
+                    if blocked:
+                        target = None
+                    elif target:
+                        # mark hit and remove from play
+                        target[2] = True
+                        target[0] = -1
+                        target[1] = -1
+                        self.num_enemies -= 1
+                        reward += 20.0
+                        self.enemy_hit = True
+                        if self.num_enemies == 0:
+                            self.done = True
             else:
                 # shooting with no ammo — heavier penalty
                 reward -= 10.0
@@ -179,7 +185,9 @@ class ShootingEnvB:
             if not self.done and not e[2]:
                 if self.enemy_behavior == "random":
                     move = np.random.choice([-1, 0, 1])  # allow stay for smoother motion
-                    e[1] = max(0, min(e[1] + move, self.height - 1))
+                    new_y = max(0, min(e[1] + move, self.height - 1))
+                    if not self.is_obstacle(e[0], new_y):
+                        e[1] = new_y
                     if move > 0:
                         self.enemy_dir = 1
                     elif move < 0:
@@ -193,7 +201,9 @@ class ShootingEnvB:
                         self.enemy_dir *= -1
                     for ee in self.enemies:
                         if not ee[2]:
-                            ee[1] = max(0, min(ee[1] + self.enemy_dir, self.height - 1))
+                            new_y = max(0, min(ee[1] + self.enemy_dir, self.height - 1))
+                            if not self.is_obstacle(ee[0], new_y):
+                                ee[1] = new_y
                 else:
                     # static: do nothing
                     pass
@@ -208,10 +218,14 @@ class ShootingEnvB:
             
         new_shots = []
         for sx, sy in self.enemy_shots:
-            sx -= self.enemy_shot_speed
-            if sx >= 0:
-                new_shots.append([sx, sy])
+            new_x = sx - self.enemy_shot_speed
+            # bullet hits obstacle → disappears
+            if new_x >= 0 and self.is_obstacle(new_x, sy):
+                continue
+            if new_x >= 0:
+                new_shots.append([new_x, sy])
         self.enemy_shots = new_shots
+
         for sx, sy in self.enemy_shots:
             if sx == self.player_x and sy == self.player_y:
                 reward -= 20
@@ -302,6 +316,11 @@ class ShootingUI:
             pygame.image.load("assets/enemy_bullet.png"),
             (cell_size, cell_size // 2)
         )
+        
+        self.obstacle_sprite = pygame.transform.scale(
+            pygame.image.load("assets/obstacle.png"),
+            (cell_size, cell_size // 2)
+        )
 
     def draw_grid(self):
         for y in range(self.env.height):
@@ -352,6 +371,11 @@ class ShootingUI:
             sprite = self.enemy_bullet_sprite   # load like others
             self.screen.blit(sprite, (sx*self.cell_size, sy*self.cell_size))
 
+    def draw_obstacles(self):
+        for (ox, oy) in self.env.obstacles:
+            self.screen.blit(self.obstacle_sprite,
+                            (ox*self.cell_size, oy*self.cell_size))
+    
 
     def render_ui(self, fps=10):
         for event in pygame.event.get():
@@ -365,6 +389,7 @@ class ShootingUI:
         self.draw_enemies()
         self.draw_shot()
         self.draw_enemy_shots()
+        self.draw_obstacles()
 
         pygame.display.flip()
         self.clock.tick(fps)
