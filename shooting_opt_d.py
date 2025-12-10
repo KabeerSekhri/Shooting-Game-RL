@@ -5,7 +5,6 @@ Grid-based Shooting Game — Option B (fixed)
 - Proper enemy removal on hit (no leftover state between episodes)
 - Hit only the nearest alive enemy on the shot row
 - Rendering ignores removed enemies
-Author: ChatGPT (GPT-5 Thinking mini) — fixes applied
 """
 
 import numpy as np
@@ -164,6 +163,151 @@ class ShootingEnvB:
     def is_obstacle(self, x, y):
         return (x, y) in self.obstacles
 
+    # Environment helpers
+    def get_compact_state(self):
+        """
+        Compute a compact state representation from the environment internals.
+        Returns a tuple of integer features in a stable order:
+        (level_idx,
+        player_row,
+        ammo_bucket,
+        nearest_enemy_dx_bucket,
+        nearest_enemy_dy_bucket,
+        enemy_in_sight_flag,
+        bullet_threat_flag,
+        obstacle_ahead_flag)
+        """
+
+        # 1) level (0..4)
+        level_idx = max(1, getattr(self, "level", 1)) - 1
+
+        # 2) player_row (0..height-1)
+        player_row = int(self.player_y)
+
+        # 3) ammo bucket (0..5) - cap for tabular Q
+        # buckets: 0,1,2,3,4,5+ -> 6 buckets
+        ammo = int(getattr(self, "ammo", 0))
+        ammo_bucket = ammo if ammo <= 5 else 5
+
+        # 4) nearest enemy dx bucket (0..4)
+        # dx = min positive (enemy_x - player_x) where enemy is alive and to the right
+        player_x = int(getattr(self, "player_x", 0))
+        nearest_dx = None
+        nearest_dy = None
+        for e in self.enemies:
+            ex, ey, hit = e
+            if hit:
+                continue
+            dx = ex - player_x
+            if dx <= 0:
+                continue
+            if nearest_dx is None or dx < nearest_dx:
+                nearest_dx = dx
+                nearest_dy = int(ey - self.player_y)
+
+        # dx buckets: 0 = adjacent (dx==1), 1 = dx 2-3, 2 = dx 4-6, 3 = dx 7+, 4 = no enemy
+        if nearest_dx is None:
+            dx_bucket = 4
+            dy_bucket = 3  # "no enemy" code
+        else:
+            if nearest_dx == 1:
+                dx_bucket = 0
+            elif nearest_dx <= 3:
+                dx_bucket = 1
+            elif nearest_dx <= 6:
+                dx_bucket = 2
+            else:
+                dx_bucket = 3
+
+            # dy bucket: -inf.. -> map to {-1,0,1,2} : above, same, below, unknown
+            if nearest_dy < 0:
+                dy_bucket = 0
+            elif nearest_dy == 0:
+                dy_bucket = 1
+            else:
+                dy_bucket = 2
+
+        # 5) enemy_in_sight_flag: any enemy in same row with no obstacle between
+        enemy_in_sight = 0
+        for e in self.enemies:
+            ex, ey, hit = e
+            if hit:
+                continue
+            if ey == self.player_y and ex > player_x:
+                # check obstacles in between
+                blocked = any(self.is_obstacle(x, self.player_y)
+                            for x in range(player_x + 1, ex))
+                if not blocked:
+                    enemy_in_sight = 1
+                    break
+
+        # 6) bullet_threat_flag: any enemy_shot on player's row and x >= player_x
+        bullet_threat = 0
+        for sx, sy in getattr(self, "enemy_shots", []):
+            if sy == self.player_y and sx >= player_x:
+                bullet_threat = 1
+                break
+
+        # 7) obstacle_ahead_flag: obstacle immediately to player's right (useful for movement)
+        obstacle_ahead = 0
+        if player_x + 1 < getattr(self, "width", 0):
+            if self.is_obstacle(player_x + 1, self.player_y):
+                obstacle_ahead = 1
+
+        return (level_idx, player_row, ammo_bucket, dx_bucket, dy_bucket,
+                enemy_in_sight, bullet_threat, obstacle_ahead)
+
+    # ---------- State <-> Index mapping ---------
+    def compact_state_sizes(self):
+        """
+        Return the dimension sizes for each compact feature in the same order as get_compact_state().
+        Used to compute mixed-radix index (state -> integer).
+        """
+        # level: 5 (levels 1..5) -> indexes 0..4
+        level_bins = getattr(self, "max_level", 5)
+        player_row_bins = self.height  # 0..height-1
+        ammo_bins = 6  # 0..5
+        dx_bins = 5    # 0..4
+        dy_bins = 4    # 0..3 (0 above,1 same,2 below,3 none)
+        in_sight_bins = 2
+        bullet_threat_bins = 2
+        obstacle_bins = 2
+
+        return (level_bins, player_row_bins, ammo_bins, dx_bins, dy_bins,
+                in_sight_bins, bullet_threat_bins, obstacle_bins)
+
+
+    def compact_state_to_index(self, compact_state):
+        """
+        Convert compact_state tuple to a single integer index using mixed-radix.
+        """
+        sizes = self.compact_state_sizes()
+        idx = 0
+        multiplier = 1
+        for val, base in zip(reversed(compact_state), reversed(sizes)):
+            if val < 0 or val >= base:
+                print("compact_state:", compact_state)
+                print("sizes:", sizes)
+                raise ValueError(f"compact state value {val} out of range for base {base}")
+            idx += val * multiplier
+            multiplier *= base
+
+        return int(idx)
+
+
+    def index_to_compact_state(self, idx):
+        """
+        Convert index -> compact_state tuple (inverse mapping).
+        """
+        sizes = self.compact_state_sizes()
+        vals = []
+        for base in reversed(sizes):
+            vals.append(int(idx % base))
+            idx //= base
+        vals = list(reversed(vals))
+        return tuple(vals)
+
+
     def step(self, action):
         """
         action: 0=Up,1=Down,2=Shoot,3=No-op
@@ -244,18 +388,22 @@ class ShootingEnvB:
                         self.enemy_dir = 1
                     elif move < 0:
                         self.enemy_dir = -1
-                else:
+                elif self.enemy_behavior == "static":
                     # static: do nothing
                     pass
+                elif self.enemy_behavior == "smart":
+                    # (optional) place your smart logic here
+                    pass
 
-        # ---------- Enemy shooting (new feature) ----------
+        # ---------- Enemy shooting ----------
         alive_enemies = [e for e in self.enemies if not e[2]]
         if alive_enemies and random.random() < (1 - self.enemy_shot_chance):
             shooter = random.choice(alive_enemies)
             sx, sy, _ = shooter
-            self.enemy_shots.append([sx - 1, sy])  # bullet appears to the left of enemy
-            self.enemy_shots.append([e[0] - 1, e[1]])  # shoot leftwards
-            
+            # spawn a single left-going bullet from the shooter (only once)
+            self.enemy_shots.append([sx - 1, sy])
+
+        # Advance enemy bullets and handle collisions with obstacles or player
         new_shots = []
         for sx, sy in self.enemy_shots:
             new_x = sx - self.enemy_shot_speed
@@ -266,10 +414,17 @@ class ShootingEnvB:
                 new_shots.append([new_x, sy])
         self.enemy_shots = new_shots
 
-        for sx, sy in self.enemy_shots:
+        # check bullet hits player
+        for sx, sy in list(self.enemy_shots):
             if sx == self.player_x and sy == self.player_y:
                 reward -= 20
-                self.player_dead = True   # player dies
+                self.player_dead = True
+                # optionally remove the bullet after hit:
+                try:
+                    self.enemy_shots.remove([sx, sy])
+                except ValueError:
+                    pass
+
 
 
         # ---------- Terminal conditions ----------
@@ -461,163 +616,138 @@ class ShootingUI:
         self.clock.tick(fps)
 
 
-# ---------- State <-> Index mapping ----------
-def state_to_index(player_y, enemy_y, ammo, enemy_dir, height, ammo_capacity):
-    """
-    enemy_y in [0..height-1] or height == special 'no enemy' value
-    enemy_dir: -1 -> 0, +1 -> 1
-    shape: player_y (height) x enemy_y (height+1) x ammo (ammo_capacity+1) x dir (2)
-    """
-    dir_idx = 0 if enemy_dir <= 0 else 1
-    enemy_range = height + 1
-    return (((player_y * enemy_range + enemy_y) * (ammo_capacity + 1) + ammo) * 2 + dir_idx)
-
-def index_to_state(index, height, ammo_capacity):
-    dir_idx = index % 2
-    index //= 2
-    ammo = index % (ammo_capacity + 1)
-    index //= (ammo_capacity + 1)
-    enemy_range = height + 1
-    enemy_y = index % enemy_range
-    player_y = index // enemy_range
-    enemy_dir = -1 if dir_idx == 0 else 1
-    return player_y, enemy_y, ammo, enemy_dir
-
 # ---------- Q-learning ----------
-def train_q_learning_levels(
-        env,
-        max_episodes_per_level=5000,
-        alpha=0.1,
-        gamma=0.99,
-        epsilon_start=1.0,
-        epsilon_min=0.05,
-        epsilon_decay=0.995,
-        success_threshold=0.70,   # 70% success for curriculum promotion
-        verbose=True):
-
-    # =============================================
-    #   GLOBAL Q-TABLE (shared across all levels)
-    # =============================================
-    max_ammo = 30     # safe bound
-    height = env.height
-    enemy_range = height + 1
-    n_states = height * enemy_range * (max_ammo + 1) * 2
+def compute_n_states_from_env(env):
+    sizes = env.compact_state_sizes()
+    n = 1
+    for s in sizes:
+        n *= s
+    return int(n)
+def train_q_learning_levels(env,
+                            max_episodes_per_level=3000,
+                            alpha=0.1,
+                            gamma=0.99,
+                            epsilon_start=0.6,
+                            epsilon_min=0.02,
+                            epsilon_decay=0.9992,
+                            success_window=200,
+                            success_threshold=0.75,
+                            verbose=True):
+    """
+    Q-learning using compact state encoding from env.get_compact_state().
+    Curriculum per level: the trainer will move to next level when success rate
+    over success_window reaches success_threshold, or when max_episodes_per_level reached.
+    """
+    # Prepare Q table
+    n_states = compute_n_states_from_env(env)
     n_actions = env.action_space_n
     Q = np.zeros((n_states, n_actions), dtype=np.float32)
 
-    # tracking
     rewards_all = []
     epsilons = []
     success_rates = []
 
-    # =============================================
-    #            TRAIN LEVEL BY LEVEL
-    # =============================================
-       # parameters to tune
-    per_level_epsilon_start = 0.6
-    per_level_epsilon_min = 0.02
-    per_level_epsilon_decay = 0.999   # much slower decay
-    success_window = 120
-    success_threshold = 0.70
+    for level in range(1, env.max_level + 1):
+        if verbose:
+            print("\n" + "="*60)
+            print(f"       TRAINING LEVEL {level}")
+            print("="*60)
 
-    for level in range(1, 6):
-        print(f"\nTraining level {level}")
-        epsilon = per_level_epsilon_start
+        # per-level epsilon reset (fresh exploration)
+        epsilon = epsilon_start
         recent_success = deque(maxlen=success_window)
-        ep = 0
 
+        ep = 0
         while True:
             ep += 1
             obs = env.reset(level=level)
-            state_idx = state_to_index(*obs, height, max_ammo)
-            total_reward = 0.0
+
+            # use compact state from env
+            compact = env.get_compact_state()
+            s_idx = env.compact_state_to_index(compact)
+
             done = False
+            total_reward = 0.0
 
             while not done:
+                # epsilon-greedy
                 if np.random.rand() < epsilon:
-                    action = np.random.randint(n_actions)
+                    a = np.random.randint(n_actions)
                 else:
-                    action = int(np.argmax(Q[state_idx]))
+                    a = int(np.argmax(Q[s_idx]))
 
-                next_obs, reward, done, info = env.step(action)
-                next_state_idx = state_to_index(*next_obs, height, max_ammo)
+                next_obs, reward, done, info = env.step(a)
 
-                Q[state_idx, action] += alpha * (
-                    reward + gamma * np.max(Q[next_state_idx]) - Q[state_idx, action]
-                )
-                state_idx = next_state_idx
+                next_compact = env.get_compact_state()
+                ns_idx = env.compact_state_to_index(next_compact)
+
+                # Q update
+                Q[s_idx, a] += alpha * (reward + gamma * np.max(Q[ns_idx]) - Q[s_idx, a])
+
+                s_idx = ns_idx
                 total_reward += reward
 
-            # rely on env-provided info
+            # episode finished
             success = bool(info.get("level_cleared", False))
             recent_success.append(1 if success else 0)
+            rewards_all.append(total_reward)
+            epsilons.append(epsilon)
+            success_rates.append(np.mean(recent_success))
 
-            # decay epsilon (per-level)
-            epsilon = max(per_level_epsilon_min, epsilon * per_level_epsilon_decay)
+            # decay epsilon inside level
+            epsilon = max(epsilon_min, epsilon * epsilon_decay)
 
-            # logging
-            if ep % 200 == 0:
-                print(f"[L{level}] ep {ep} | success_rate {np.mean(recent_success):.3f} | eps {epsilon:.3f}")
+            if verbose and ep % 200 == 0:
+                print(f"[L{level}] ep {ep} | recent_success {np.mean(recent_success):.3f} | eps {epsilon:.3f} | reward {total_reward:+5.1f}")
 
             # curriculum condition
             if len(recent_success) == success_window and np.mean(recent_success) >= success_threshold:
-                print(f"Level {level} mastered (success {np.mean(recent_success):.2f}). Moving on.")
+                print(f"Level {level} solved (window avg {np.mean(recent_success):.3f}). Moving to next level.")
                 break
 
-            # fail-safe per-level cap
             if ep >= max_episodes_per_level:
-                print(f"Max episodes for level {level} reached ({ep}). Moving on.")
+                print(f"Max episodes reached for level {level} ({ep}). Moving on.")
                 break
 
-            # ===============================================
-            #   CURRICULUM BREAK CONDITION
-            # ===============================================
-            if len(recent_success) == 300 and np.mean(recent_success) > success_threshold:
-                print(f"\n✓ Level {level} mastered! "
-                      f"Success rate = {np.mean(recent_success):.2f}")
-                break
+        # end level
+        print(f"Level {level} final success rate -> {np.mean(recent_success):.3f}")
 
-            # ===============================================
-            #   FAIL-SAFE: cap the episodes
-            # ===============================================
-            if ep >= max_episodes_per_level:
-                print(f"\n⚠ Max episodes reached for Level {level}. "
-                      f"Moving on anyway.")
-                break
-
-        # --- end of this level ---
-        print(f"Level {level} final success rate → {np.mean(recent_success):.2f}")
-
-    print("\n" + "="*70)
-    print("                ALL LEVELS TRAINED SUCCESSFULLY")
-    print("="*70)
-
+    print("\nTraining complete.")
     return Q, rewards_all, epsilons, success_rates
 
 
 
 # ---------- Evaluation ----------
 def evaluate_policy(env, Q, episodes=200, render=False):
-    height = env.height
-    ammo_capacity = env.ammo_capacity
     successes = 0
     rewards = []
+    
     for ep in range(episodes):
         obs = env.reset()
-        state_idx = state_to_index(obs[0], obs[1], obs[2], obs[3], height, ammo_capacity)
+        # convert raw obs to compact state
+        compact_obs = env.get_compact_state()
+        state_idx = env.compact_state_to_index(compact_obs)
         total_reward = 0.0
         done = False
+
         while not done:
             action = int(np.argmax(Q[state_idx]))
             next_obs, reward, done, _ = env.step(action)
             total_reward += reward
-            state_idx = state_to_index(next_obs[0], next_obs[1], next_obs[2], next_obs[3], height, ammo_capacity)
+
+            # convert next_obs to compact state
+            compact_next_obs = env.get_compact_state()
+            state_idx = env.compact_state_to_index(compact_next_obs)
+
             if render:
                 env.render()
+
         rewards.append(total_reward)
         if total_reward > 10.0:
             successes += 1
+
     return successes / episodes, np.mean(rewards), np.std(rewards)
+
 
 # ---------- Utilities ----------
 def plot_training(rewards, epsilons, success_rates, outdir="results_d"):
@@ -698,14 +828,14 @@ def main():
     print("\nExample interactive episode (rendered):")
     obs = env.reset()
     done = False
-    height = env.height
-    ammo_capacity = env.ammo_capacity
-    state_idx = state_to_index(obs[0], obs[1], obs[2], obs[3], height, ammo_capacity)
+    compact_obs = env.get_compact_state()
+    state_idx =env.compact_state_to_index(compact_obs)
     steps = 0
     while not done and steps < env.max_steps:
         action = int(np.argmax(Q[state_idx]))
         obs, reward, done, _ = env.step(action)
-        state_idx = state_to_index(obs[0], obs[1], obs[2], obs[3], height, ammo_capacity)
+        compact_obs = env.get_compact_state()
+        state_idx = env.compact_state_to_index(compact_obs)
         steps += 1
     env.render()
 

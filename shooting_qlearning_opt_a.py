@@ -10,8 +10,6 @@ Environment:
 - Actions: 0=Up, 1=Down, 2=Shoot, 3=No-op
 
 Q-learning tabular agent trains on this environment.
-
-Author: ChatGPT
 """
 
 import numpy as np

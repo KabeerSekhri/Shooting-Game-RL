@@ -5,7 +5,6 @@ Grid-based Shooting Game — Option B (fixed)
 - Proper enemy removal on hit (no leftover state between episodes)
 - Hit only the nearest alive enemy on the shot row
 - Rendering ignores removed enemies
-Author: ChatGPT (GPT-5 Thinking mini) — fixes applied
 """
 
 import numpy as np
@@ -546,7 +545,7 @@ def load_qtable(filename="q_table_option_c.pkl"):
 # ---------- Main ----------
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--episodes", type=int, default=3000, help="Training episodes")
+    parser.add_argument("--episodes", type=int, default=10000, help="Training episodes")
     parser.add_argument("--width", type=int, default=10, help="Grid width")
     parser.add_argument("--height", type=int, default=10, help="Grid height")
     parser.add_argument("--max-steps", type=int, default=60, help="Max steps per episode")
